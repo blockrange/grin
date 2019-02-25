@@ -15,11 +15,14 @@
 //! Selection of inputs for building transactions
 
 use crate::core::core::{amount_to_hr_string, Transaction};
-use crate::core::libtx::{build, slate::Slate, tx_fee};
+use crate::core::libtx::{build, tx_fee};
+use crate::core::{consensus, global};
 use crate::keychain::{Identifier, Keychain};
 use crate::libwallet::error::{Error, ErrorKind};
 use crate::libwallet::internal::keys;
+use crate::libwallet::slate::Slate;
 use crate::libwallet::types::*;
+use std::cmp::min;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 
@@ -32,7 +35,6 @@ pub fn build_send_tx<T: ?Sized, C, K>(
 	wallet: &mut T,
 	slate: &mut Slate,
 	minimum_confirmations: u64,
-	max_outputs: usize,
 	change_outputs: usize,
 	selection_strategy_is_use_all: bool,
 	parent_key_id: Identifier,
@@ -48,7 +50,6 @@ where
 		slate.height,
 		minimum_confirmations,
 		slate.lock_height,
-		max_outputs,
 		change_outputs,
 		selection_strategy_is_use_all,
 		&parent_key_id,
@@ -219,6 +220,16 @@ where
 	Ok((key_id, context, Box::new(wallet_add_fn)))
 }
 
+/// Calculate maximal amount of inputs in transaction given amount of outputs
+fn calculate_max_inputs_in_block(num_outputs: usize) -> usize {
+	let coinbase_weight = consensus::BLOCK_OUTPUT_WEIGHT + consensus::BLOCK_KERNEL_WEIGHT;
+	global::max_block_weight().saturating_sub(
+		coinbase_weight
+			+ consensus::BLOCK_OUTPUT_WEIGHT.saturating_mul(num_outputs)
+			+ consensus::BLOCK_KERNEL_WEIGHT,
+	) / consensus::BLOCK_INPUT_WEIGHT
+}
+
 /// Builds a transaction to send to someone from the HD seed associated with the
 /// wallet and the amount to send. Handles reading through the wallet data file,
 /// selecting outputs to spend and building the change.
@@ -228,7 +239,6 @@ pub fn select_send_tx<T: ?Sized, C, K>(
 	current_height: u64,
 	minimum_confirmations: u64,
 	lock_height: u64,
-	max_outputs: usize,
 	change_outputs: usize,
 	selection_strategy_is_use_all: bool,
 	parent_key_id: &Identifier,
@@ -246,13 +256,57 @@ where
 	C: NodeClient,
 	K: Keychain,
 {
+	let (coins, _total, amount, fee) = select_coins_and_fee(
+		wallet,
+		amount,
+		current_height,
+		minimum_confirmations,
+		change_outputs,
+		selection_strategy_is_use_all,
+		&parent_key_id,
+	)?;
+
+	// build transaction skeleton with inputs and change
+	let (mut parts, change_amounts_derivations) =
+		inputs_and_change(&coins, wallet, amount, fee, change_outputs)?;
+
+	// This is more proof of concept than anything but here we set lock_height
+	// on tx being sent (based on current chain height via api).
+	parts.push(build::with_lock_height(lock_height));
+
+	Ok((parts, coins, change_amounts_derivations, fee))
+}
+
+/// Select outputs and calculating fee.
+pub fn select_coins_and_fee<T: ?Sized, C, K>(
+	wallet: &mut T,
+	amount: u64,
+	current_height: u64,
+	minimum_confirmations: u64,
+	change_outputs: usize,
+	selection_strategy_is_use_all: bool,
+	parent_key_id: &Identifier,
+) -> Result<
+	(
+		Vec<OutputData>,
+		u64, // total
+		u64, // amount
+		u64, // fee
+	),
+	Error,
+>
+where
+	T: WalletBackend<C, K>,
+	C: NodeClient,
+	K: Keychain,
+{
 	// select some spendable coins from the wallet
 	let (max_outputs, mut coins) = select_coins(
 		wallet,
 		amount,
 		current_height,
 		minimum_confirmations,
-		max_outputs,
+		calculate_max_inputs_in_block(change_outputs),
 		selection_strategy_is_use_all,
 		parent_key_id,
 	);
@@ -314,7 +368,7 @@ where
 				amount_with_fee,
 				current_height,
 				minimum_confirmations,
-				max_outputs,
+				calculate_max_inputs_in_block(num_outputs),
 				selection_strategy_is_use_all,
 				parent_key_id,
 			)
@@ -324,16 +378,7 @@ where
 			amount_with_fee = amount + fee;
 		}
 	}
-
-	// build transaction skeleton with inputs and change
-	let (mut parts, change_amounts_derivations) =
-		inputs_and_change(&coins, wallet, amount, fee, change_outputs)?;
-
-	// This is more proof of concept than anything but here we set lock_height
-	// on tx being sent (based on current chain height via api).
-	parts.push(build::with_lock_height(lock_height));
-
-	Ok((parts, coins, change_amounts_derivations, fee))
+	Ok((coins, total, amount, fee))
 }
 
 /// Selects inputs and change for a transaction
@@ -438,39 +483,19 @@ where
 		})
 		.collect::<Vec<OutputData>>();
 
-	let max_available = eligible.len();
+	// max_available can not be bigger than max_outputs
+	let max_available = min(eligible.len(), max_outputs);
 
 	// sort eligible outputs by increasing value
 	eligible.sort_by_key(|out| out.value);
 
 	// use a sliding window to identify potential sets of possible outputs to spend
-	// Case of amount > total amount of max_outputs(500):
-	// The limit exists because by default, we always select as many inputs as
-	// possible in a transaction, to reduce both the Output set and the fees.
-	// But that only makes sense up to a point, hence the limit to avoid being too
-	// greedy. But if max_outputs(500) is actually not enough to cover the whole
-	// amount, the wallet should allow going over it to satisfy what the user
-	// wants to send. So the wallet considers max_outputs more of a soft limit.
-	if eligible.len() > max_outputs {
-		for window in eligible.windows(max_outputs) {
+	if max_available > 0 {
+		for window in eligible.windows(max_available) {
 			let windowed_eligibles = window.iter().cloned().collect::<Vec<_>>();
 			if let Some(outputs) = select_from(amount, select_all, windowed_eligibles) {
 				return (max_available, outputs);
 			}
-		}
-		// Not exist in any window of which total amount >= amount.
-		// Then take coins from the smallest one up to the total amount of selected
-		// coins = the amount.
-		if let Some(outputs) = select_from(amount, false, eligible.clone()) {
-			debug!(
-				"Extending maximum number of outputs. {} outputs selected.",
-				outputs.len()
-			);
-			return (max_available, outputs);
-		}
-	} else {
-		if let Some(outputs) = select_from(amount, select_all, eligible.clone()) {
-			return (max_available, outputs);
 		}
 	}
 
@@ -480,7 +505,7 @@ where
 	eligible.reverse();
 	(
 		max_available,
-		eligible.iter().take(max_outputs).cloned().collect(),
+		eligible.iter().take(max_available).cloned().collect(),
 	)
 }
 

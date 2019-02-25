@@ -21,12 +21,12 @@ use self::chain::Chain;
 use self::core::core::verifier_cache::LruVerifierCache;
 use self::core::core::Transaction;
 use self::core::global::{set_mining_mode, ChainTypes};
-use self::core::libtx::slate::Slate;
 use self::core::{pow, ser};
 use self::keychain::Keychain;
 use self::util::secp::pedersen;
 use self::util::secp::pedersen::Commitment;
 use self::util::{Mutex, RwLock, StopState};
+use crate::libwallet::slate::Slate;
 use crate::libwallet::types::*;
 use crate::{controller, libwallet, WalletCommAdapter, WalletConfig};
 use failure::ResultExt;
@@ -135,6 +135,10 @@ where
 		wallet: Arc<Mutex<dyn WalletInst<LocalWalletClient, K>>>,
 	) {
 		self.wallets.insert(addr.to_owned(), (tx, wallet));
+	}
+
+	pub fn stop(&mut self) {
+		self.running.store(false, Ordering::Relaxed);
 	}
 
 	/// Run the incoming message queue and respond more or less

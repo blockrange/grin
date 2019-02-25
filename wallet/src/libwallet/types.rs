@@ -21,11 +21,11 @@ use crate::core::libtx::aggsig;
 use crate::core::ser;
 use crate::keychain::{Identifier, Keychain};
 use crate::libwallet::error::{Error, ErrorKind};
+use crate::libwallet::slate::ParticipantMessages;
 use crate::util::secp::key::{PublicKey, SecretKey};
 use crate::util::secp::{self, pedersen, Secp256k1};
 use chrono::prelude::*;
 use failure::ResultExt;
-use grin_core::libtx::slate::ParticipantMessages;
 use serde;
 use serde_json;
 use std::collections::HashMap;
@@ -710,8 +710,6 @@ pub struct SendTXArgs {
 	pub method: String,
 	/// destination url
 	pub dest: String,
-	/// Max number of outputs
-	pub max_outputs: usize,
 	/// Number of change outputs to generate
 	pub num_change_outputs: usize,
 	/// whether to use all outputs (combine)

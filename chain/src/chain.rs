@@ -660,7 +660,7 @@ impl Chain {
 
 	/// Return a merkle proof valid for the current output pmmr state at the
 	/// given pos
-	pub fn get_merkle_proof_for_pos(&self, commit: Commitment) -> Result<MerkleProof, String> {
+	pub fn get_merkle_proof_for_pos(&self, commit: Commitment) -> Result<MerkleProof, Error> {
 		let mut txhashset = self.txhashset.write();
 		txhashset.merkle_proof(commit)
 	}
@@ -857,6 +857,14 @@ impl Chain {
 		}
 
 		let header = self.get_block_header(&h)?;
+
+		{
+			let mut txhashset_ref = self.txhashset.write();
+			// Drop file handles in underlying txhashset
+			txhashset_ref.release_backend_files();
+		}
+
+		// Rewrite hashset
 		txhashset::zip_write(self.db_root.clone(), txhashset_data, &header)?;
 
 		let mut txhashset =
