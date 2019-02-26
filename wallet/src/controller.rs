@@ -548,6 +548,20 @@ where
 		})
 	}
 
+	pub fn check_repair(
+		&self,
+		_req: Request<Body>,
+		mut api: APIOwner<T, C, K>,
+	) -> Box<dyn Future<Item = (), Error = Error> + Send> {
+		Box::new(match api.check_repair() {
+			Ok(_) => ok(()),
+			Err(e) => {
+				error!("check_repair: failed with error: {}", e);
+				err(e)
+			}
+		})
+	}
+
 	fn handle_post_request(&self, req: Request<Body>) -> WalletResponseFuture {
 		let api = APIOwner::new(self.wallet.clone());
 		match req
@@ -576,6 +590,10 @@ where
 			),
 			"repost" => Box::new(
 				self.repost(req, api)
+					.and_then(|_| ok(response(StatusCode::OK, ""))),
+			),
+			"check_repair" => Box::new(
+				self.check_repair(req, api)
 					.and_then(|_| ok(response(StatusCode::OK, ""))),
 			),
 			_ => Box::new(err(ErrorKind::GenericError(
